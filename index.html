@@ -3,155 +3,387 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>3D Archery Game</title>
+  <title>3D Archery Range (Target Fix + Import Patch)</title>
   <style>
-    html, body { margin:0; height:100%; overflow:hidden; background:#87CEEB; }
-    #hud {
-      position: absolute; top: 10px; left: 10px; z-index: 10;
-      font-family: sans-serif; background: rgba(255,255,255,0.8);
-      padding: 10px; border-radius: 8px;
-    }
-    #score { font-weight: bold; }
+    html, body { margin:0; height:100%; overflow:hidden; background:#9fd0ff; }
+    #ui { position:fixed; top:12px; left:12px; z-index:10; font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; color:#111; }
+    .panel { background:rgba(255,255,255,.85); border-radius:12px; padding:12px 14px; box-shadow:0 6px 18px rgba(0,0,0,.15); margin-bottom:10px; }
+    .row { display:flex; align-items:center; gap:10px; }
+    #windArrow { width:38px; height:38px; transform-origin:50% 50%; transition:transform .3s ease; }
+    #powerWrap { width:220px; height:10px; background:#e7edf3; border-radius:999px; overflow:hidden; }
+    #powerBar { height:100%; width:0%; background:linear-gradient(90deg,#60a5fa,#34d399); transition:width .06s linear; }
+    #hud { position:fixed; top:12px; right:12px; z-index:10; display:flex; flex-direction:column; gap:10px; }
+    #scorePanel { min-width:220px; }
+    #msg { font-size:.9rem; color:#2b5; min-height:1.2em; }
+    #help { position:fixed; bottom:12px; left:12px; right:12px; z-index:10; display:flex; justify-content:center; pointer-events:none; }
+    #help .panel { pointer-events:auto; }
+    #testPanel { position:fixed; bottom:12px; right:12px; z-index:10; }
+    #testPanel .ok { color:#0a7d2c; }
+    #testPanel .fail { color:#b00020; }
+    kbd { background:#111; color:#fff; padding:2px 6px; border-radius:6px; font-size:.85rem; }
   </style>
 </head>
 <body>
-<div id="hud">
-  <div>Wind: <span id="wind"></span></div>
-  <div>Score: <span id="score">0</span></div>
-  <div>Click and drag to aim, release to shoot.</div>
-</div>
-<script type="module">
-import * as THREE from "https://unpkg.com/three@0.160.0/build/three.module.js";
-import { OrbitControls } from "https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js";
+  <div id="ui">
+    <div class="panel" id="windPanel">
+      <div class="row">
+        <svg id="windArrow" viewBox="0 0 100 100">
+          <defs>
+            <linearGradient id="g" x1="0" x2="1">
+              <stop offset="0%" stop-color="#60a5fa"/>
+              <stop offset="100%" stop-color="#34d399"/>
+            </linearGradient>
+          </defs>
+          <circle cx="50" cy="50" r="46" fill="none" stroke="#cfe4ff" stroke-width="4" />
+          <g transform="translate(50,50)">
+            <path d="M 0 -34 L 9 -14 L 3 -14 L 3 34 L -3 34 L -3 -14 L -9 -14 Z" fill="url(#g)" stroke="#0b4870" stroke-opacity=".25" />
+          </g>
+        </svg>
+        <div>
+          <div style="font-weight:700">Wind</div>
+          <div id="windText">Calm</div>
+        </div>
+      </div>
+    </div>
+    <div class="panel">
+      <div style="font-weight:700; margin-bottom:6px;">Power</div>
+      <div id="powerWrap"><div id="powerBar"></div></div>
+    </div>
+  </div>
+  <div id="hud">
+    <div class="panel" id="scorePanel">
+      <div style="font-weight:700; margin-bottom:6px;">Scoreboard</div>
+      <div>Total: <span id="totalScore">0</span></div>
+      <div>Shots: <span id="shots">0</span></div>
+      <div id="msg"></div>
+    </div>
+  </div>
+  <div id="help">
+    <div class="panel">
+      <b>How to Play:</b>
+      Click & hold anywhere to draw → <kbd>Release</kbd> to shoot. Aim by dragging.
+      Watch the wind dial for direction & strength. Bullseye = 10. 
+      <span style="margin-left:8px">Shortcuts: <kbd>F</kbd> Center on target • <kbd>R</kbd> Reset camera</span>
+    </div>
+  </div>
 
-let scene = new THREE.Scene();
-let camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
-let renderer = new THREE.WebGLRenderer({antialias:true});
-renderer.setSize(window.innerWidth, window.innerHeight);
-document.body.appendChild(renderer.domElement);
+  <!-- Minimal self-tests/results UI -->
+  <div id="testPanel" class="panel" hidden>
+    <div style="font-weight:700; margin-bottom:6px;">Self-tests</div>
+    <ul id="testList" style="padding-left:18px; margin:0"></ul>
+  </div>
 
-// Light
-scene.add(new THREE.AmbientLight(0xffffff, 0.8));
-let dirLight = new THREE.DirectionalLight(0xffffff, 0.5);
-dirLight.position.set(5,10,7);
-scene.add(dirLight);
+  <script type="module">
+    // FIX: Use ESM CDN that rewrites bare specifiers. unpkg with ?module ensures
+    // internal imports like `import ... from "three"` resolve properly in the browser.
+    import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js?module';
+    import { OrbitControls } from 'https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js?module';
 
-// Ground
-let ground = new THREE.Mesh(
-  new THREE.PlaneGeometry(100,100),
-  new THREE.MeshLambertMaterial({color:0x228B22})
-);
-ground.rotation.x = -Math.PI/2;
-scene.add(ground);
-
-// Target
-let target = new THREE.Mesh(
-  new THREE.CylinderGeometry(2,2,0.2,32),
-  new THREE.MeshBasicMaterial({color:0xffffff})
-);
-target.position.set(0,2,-50);
-target.rotation.x = Math.PI/2;
-scene.add(target);
-
-// Bullseye
-let bullseye = new THREE.Mesh(
-  new THREE.CircleGeometry(0.5,32),
-  new THREE.MeshBasicMaterial({color:0xff0000})
-);
-bullseye.position.set(0,2.01,-50);
-bullseye.rotation.x = -Math.PI/2;
-scene.add(bullseye);
-
-// Bow position
-camera.position.set(0,2,0);
-let controls = new OrbitControls(camera, renderer.domElement);
-controls.enablePan = false;
-controls.maxPolarAngle = Math.PI/2;
-
-// Wind
-let windStrength = 0;
-let windDirection = 0;
-function randomWind() {
-  windStrength = (Math.random()*2 - 1) * 2; // m/s
-  windDirection = Math.random() * 2 * Math.PI;
-  let dirText = ((windDirection*180/Math.PI) | 0) + "°";
-  document.getElementById('wind').textContent = `${windStrength.toFixed(1)} m/s @ ${dirText}`;
-}
-randomWind();
-
-// Shooting
-let arrows = [];
-let score = 0;
-let isDrawing = false;
-let drawStart = 0;
-
-renderer.domElement.addEventListener('mousedown', () => {
-  isDrawing = true;
-  drawStart = performance.now();
-});
-renderer.domElement.addEventListener('mouseup', () => {
-  if (!isDrawing) return;
-  isDrawing = false;
-  let drawPower = Math.min((performance.now() - drawStart) / 1000, 2); // max 2s
-  shootArrow(drawPower * 50);
-});
-
-function shootArrow(speed) {
-  let arrow = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.05,0.05,2),
-    new THREE.MeshBasicMaterial({color:0x8B4513})
-  );
-  arrow.rotation.z = Math.PI/2;
-  arrow.position.set(camera.position.x, camera.position.y, camera.position.z);
-  let dir = new THREE.Vector3(0,0,-1);
-  dir.applyQuaternion(camera.quaternion).normalize();
-  arrow.userData = {
-    velocity: dir.multiplyScalar(speed),
-    alive: true
-  };
-  arrows.push(arrow);
-  scene.add(arrow);
-  randomWind();
-}
-
-function animate() {
-  requestAnimationFrame(animate);
-  let delta = 0.016;
-
-  arrows.forEach(arrow => {
-    if (!arrow.userData.alive) return;
-    // wind effect
-    let windVec = new THREE.Vector3(Math.cos(windDirection), 0, Math.sin(windDirection)).multiplyScalar(windStrength);
-    arrow.userData.velocity.add(windVec.clone().multiplyScalar(delta));
-    arrow.position.add(arrow.userData.velocity.clone().multiplyScalar(delta));
-
-    // gravity
-    arrow.userData.velocity.y -= 9.8 * delta;
-
-    // check hit (simple bounding check)
-    const onPlaneZ = Math.abs(arrow.position.z - target.position.z) < 0.5;
-    const yOk = Math.abs(arrow.position.y - 2) < 1.2; // target height window
-    const xOk = Math.abs(arrow.position.x - target.position.x) < 2.0; // target radius window
-    if (onPlaneZ && yOk && xOk) {
-      arrow.userData.alive = false;
-      // bullseye proximity
-      let dist = arrow.position.distanceTo(bullseye.position);
-      if (dist < 0.5) score += 10;
-      else score += 5;
-      document.getElementById('score').textContent = score;
+    // ======= Self-tests (do not modify existing tests) =======
+    const tests = [];
+    function t(name, fn){
+      try{ fn(); tests.push({name, ok:true}); }
+      catch(e){ console.error(e); tests.push({name, ok:false, err:e.message}); }
     }
-  });
+    t('THREE loads', ()=>{ if(!THREE?.Scene) throw new Error('THREE missing'); });
+    t('OrbitControls loads', ()=>{ if(typeof OrbitControls !== 'function') throw new Error('OrbitControls missing'); });
+    function renderTests(){
+      const p=document.getElementById('testPanel'), l=document.getElementById('testList');
+      let any=false;
+      tests.forEach(r=>{ any=true; const li=document.createElement('li'); li.textContent=r.name + (r.ok?' ✓':' ✗'); li.className=r.ok?'ok':'fail'; if(!r.ok){const s=document.createElement('div'); s.style.fontSize='.8rem'; s.textContent=r.err; li.appendChild(s);} l.appendChild(li); });
+      if(any) p.hidden=false;
+    }
 
-  controls.update();
-  renderer.render(scene, camera);
-}
-animate();
+    // --- Scene Basics ---
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x9fd0ff);
+    scene.fog = new THREE.Fog(0x9fd0ff, 80, 250);
 
-window.addEventListener('resize', ()=>{
-  camera.aspect = window.innerWidth/window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-});
-</script>
+    const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.1, 1000);
+    camera.position.set(0, 2.2, 10);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.shadowMap.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    // Lights
+    const sun = new THREE.DirectionalLight(0xffffff, 1.15);
+    sun.position.set(20, 40, 10);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    scene.add(sun);
+    const ambient = new THREE.HemisphereLight(0xbdd7ff, 0x79a56a, 0.65);
+    scene.add(ambient);
+
+    // Controls
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.maxPolarAngle = Math.PI * 0.49;
+    controls.target.set(0, 1.4, -25); // look down the lane by default so target area is in view
+
+    // --- Environment ---
+    const groundGeo = new THREE.PlaneGeometry(200, 200);
+    const groundMat = new THREE.MeshStandardMaterial({ color: 0x86c07a, roughness: 1, metalness: 0 });
+    const ground = new THREE.Mesh(groundGeo, groundMat);
+    ground.rotation.x = -Math.PI/2;
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    function addHill(x, z, r, h, color) {
+      const geo = new THREE.ConeGeometry(r, h, 24, 1, true);
+      const mat = new THREE.MeshStandardMaterial({ color, roughness: 1, metalness: 0, side: THREE.DoubleSide });
+      const hill = new THREE.Mesh(geo, mat);
+      hill.position.set(x, h/2 - 2, z);
+      hill.rotation.z = Math.PI;
+      hill.receiveShadow = true;
+      scene.add(hill);
+    }
+    addHill(-70, -120, 60, 40, 0x77b16a);
+    addHill(60, -150, 70, 50, 0x6aa660);
+
+    function addTree(x, z) {
+      const trunkGeo = new THREE.CylinderGeometry(0.1, 0.15, 1.6, 8);
+      const trunkMat = new THREE.MeshStandardMaterial({ color: 0x8b5a2b });
+      const trunk = new THREE.Mesh(trunkGeo, trunkMat);
+      trunk.position.set(x, 0.8, z);
+      trunk.castShadow = true; trunk.receiveShadow = true;
+      const crownGeo = new THREE.SphereGeometry(0.9, 14, 12);
+      const crownMat = new THREE.MeshStandardMaterial({ color: 0x2f8f46, roughness: 1 });
+      const crown = new THREE.Mesh(crownGeo, crownMat);
+      crown.position.set(0, 1.2, 0);
+      crown.castShadow = true; crown.receiveShadow = true;
+      const pivot = new THREE.Group();
+      pivot.add(trunk); trunk.add(crown);
+      scene.add(pivot);
+    }
+    for (let i=0;i<28;i++) {
+      const x = (Math.random()*2-1) * 40;
+      const z = -20 - Math.random()*120;
+      if (Math.abs(x) < 5 && z>-70) continue; // keep lane clear near the target
+      addTree(x, z);
+    }
+
+    // Range Delineators
+    const laneGeo = new THREE.BoxGeometry(0.08, 0.08, 50);
+    const laneMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: .8 });
+    const laneL = new THREE.Mesh(laneGeo, laneMat);
+    const laneR = new THREE.Mesh(laneGeo, laneMat);
+    laneL.position.set(-1.5, 0.04, -25); laneR.position.set(1.5, 0.04, -25);
+    scene.add(laneL, laneR);
+
+    // --- Target (bullseye on a stand) ---
+    const targetDistance = 55;
+    const targetRadius = 1.35; // slightly larger for visibility
+
+    function makeTargetTexture() {
+      const canvas = document.createElement('canvas');
+      canvas.width = 512; canvas.height = 512;
+      const ctx = canvas.getContext('2d');
+      const rings = [
+        { r:1.00, c:'#ffffff' }, // outer white
+        { r:0.84, c:'#000000' }, // black
+        { r:0.68, c:'#00a0ff' }, // blue
+        { r:0.52, c:'#ff3030' }, // red
+        { r:0.36, c:'#ffd000' }, // yellow
+        { r:0.16, c:'#fffd80' }  // inner yellow
+      ];
+      ctx.translate(256,256);
+      ctx.scale(256,256);
+      for (const ring of rings) { ctx.beginPath(); ctx.arc(0,0, ring.r, 0, Math.PI*2); ctx.fillStyle = ring.c; ctx.fill(); }
+      return new THREE.CanvasTexture(canvas);
+    }
+
+    // Use a VERY THIN cylinder but rotate it so the face points toward the shooter
+    const targetFaceGeo = new THREE.CylinderGeometry(targetRadius, targetRadius, 0.08, 64);
+    const targetFaceMat = new THREE.MeshStandardMaterial({ map: makeTargetTexture(), roughness:.55, metalness:0, emissive:0x111111, emissiveIntensity:0.12 });
+    const targetFace = new THREE.Mesh(targetFaceGeo, targetFaceMat);
+    targetFace.position.set(0, 1.4, -targetDistance);
+    targetFace.rotation.x = Math.PI/2; // face the archer
+    targetFace.castShadow = true; targetFace.receiveShadow = true;
+
+    // Add a slim white backboard behind the target for contrast
+    const backboard = new THREE.Mesh(new THREE.CircleGeometry(targetRadius*1.15, 48), new THREE.MeshStandardMaterial({ color:0xffffff, roughness:.8 }));
+    backboard.position.set(0, 1.4, -targetDistance - 0.06);
+    backboard.rotation.x = Math.PI/2;
+    backboard.receiveShadow = true;
+
+    // Stand
+    const standGeo = new THREE.BoxGeometry(1.8, 0.1, 0.4);
+    const stand = new THREE.Mesh(standGeo, new THREE.MeshStandardMaterial({ color:0x444 }));
+    stand.position.set(0, 0.65, -targetDistance);
+    const legsGeo = new THREE.CylinderGeometry(0.05,0.05,1.3,8);
+    const leg1 = new THREE.Mesh(legsGeo, new THREE.MeshStandardMaterial({ color:0x444 }));
+    const leg2 = leg1.clone();
+    leg1.position.set(-0.7, 0.65, -targetDistance+0.16);
+    leg2.position.set( 0.7, 0.65, -targetDistance-0.16);
+
+    scene.add(targetFace, backboard, stand, leg1, leg2);
+
+    // --- Arrow ---
+    const arrow = new THREE.Group();
+    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.03,0.03,1.2,10), new THREE.MeshStandardMaterial({ color:0xeeeeee, roughness:.5 }));
+    shaft.castShadow = true; shaft.receiveShadow = true;
+    const tip = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.18, 12), new THREE.MeshStandardMaterial({ color:0xb0b0b0, metalness:.6, roughness:.2 }));
+    tip.position.y = 0.69;
+    const fletch = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.22, 6), new THREE.MeshStandardMaterial({ color:0x2563eb, roughness:.6 }));
+    fletch.position.y = -0.69; fletch.rotation.x = Math.PI;
+    arrow.add(shaft, tip, fletch);
+    scene.add(arrow);
+
+    let state = 'ready';
+    let v = new THREE.Vector3(); // velocity
+    let wind = new THREE.Vector3();
+    let startPos = new THREE.Vector3(0, 1.5, 0);
+    let power = 0; // 0..1
+    let totalScore = 0, shots = 0;
+
+    const powerBar = document.getElementById('powerBar');
+    const totalScoreEl = document.getElementById('totalScore');
+    const shotsEl = document.getElementById('shots');
+    const msgEl = document.getElementById('msg');
+    const windArrow = document.getElementById('windArrow');
+    const windText = document.getElementById('windText');
+
+    function setArrowIdlePose() {
+      const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
+      const right = new THREE.Vector3(1,0,0).applyQuaternion(camera.quaternion);
+      const up = new THREE.Vector3(0,1,0);
+      arrow.position.copy(startPos);
+      arrow.position.addScaledVector(right, -0.25);
+      arrow.position.addScaledVector(up, -0.05);
+      const q = new THREE.Quaternion();
+      q.setFromUnitVectors(new THREE.Vector3(0,1,0), dir.clone().normalize());
+      arrow.setRotationFromQuaternion(q);
+    }
+
+    function randomizeWind() {
+      const mag = Math.random() * 7.5; // 0..7.5 m/s
+      const ang = Math.random() * Math.PI * 2;
+      wind.set(Math.cos(ang)*mag, 0, Math.sin(ang)*mag);
+      updateWindUI();
+    }
+    function updateWindUI() {
+      const dirAngle = Math.atan2(wind.x, -wind.z); // Z toward target
+      const deg = dirAngle * 180/Math.PI;
+      windArrow.style.transform = `rotate(${deg}deg)`;
+      windText.textContent = `${wind.length().toFixed(1)} m/s`;
+    }
+
+    function chargeTick(dt) {
+      const speed = 0.9;
+      power += dt/speed * (chargingUp?1:-1);
+      if (power >= 1) { power = 1; chargingUp = false; }
+      if (power <= 0) { power = 0; chargingUp = true; }
+      powerBar.style.width = `${Math.round(power*100)}%`;
+    }
+
+    function shoot() {
+      const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
+      dir.normalize();
+      const base = 26, extra = 42;
+      const speed = base + extra * power;
+      v.copy(dir).multiplyScalar(speed);
+      state = 'flying';
+    }
+
+    function scoreHit(localX, localY) {
+      const r = Math.hypot(localX, localY);
+      const R = targetRadius;
+      if (r > R) return 0;
+      const rings = [0.16*R, 0.36*R, 0.52*R, 0.68*R, 0.84*R, 1.00*R];
+      const ringScores = [10, 9, 8, 7, 6, 5];
+      for (let i=0; i<rings.length; i++) if (r <= rings[i]) return ringScores[i];
+      return 0;
+    }
+
+    // Input
+    let mouseDown = false, chargingUp = true;
+    addEventListener('pointerdown', ()=>{ if (state === 'ready') { mouseDown = true; state = 'charging'; chargingUp = true; }});
+    addEventListener('pointerup', ()=>{ if (state === 'charging') { mouseDown = false; shoot(); }});
+
+    // Shortcuts
+    addEventListener('keydown', (e)=>{
+      if (e.key.toLowerCase()==='f') centerOnTarget();
+      if (e.key.toLowerCase()==='r') resetCamera();
+    });
+
+    function centerOnTarget(){
+      controls.target.set(0, 1.4, -targetDistance);
+      camera.position.set(0, 1.8, -targetDistance + 8);
+    }
+    function resetCamera(){
+      controls.target.set(0, 1.4, -25);
+      camera.position.set(0, 2.2, 10);
+    }
+
+    // Physics constants
+    const GRAVITY = new THREE.Vector3(0, -9.8, 0);
+    const WIND_SCALE = 0.12;
+    const DRAG = 0.012;
+
+    function update(dt) {
+      controls.update();
+      if (state === 'ready') { setArrowIdlePose(); }
+      else if (state === 'charging') { setArrowIdlePose(); chargeTick(dt); }
+      else if (state === 'flying') {
+        const a = new THREE.Vector3().copy(GRAVITY).addScaledVector(wind, WIND_SCALE).addScaledVector(v, -DRAG);
+        v.addScaledVector(a, dt);
+        arrow.position.addScaledVector(v, dt);
+        if (v.lengthSq() > 1e-3) {
+          const q = new THREE.Quaternion();
+          const dir = v.clone().normalize();
+          q.setFromUnitVectors(new THREE.Vector3(0,1,0), dir);
+          arrow.setRotationFromQuaternion(q);
+        }
+        if (arrow.position.y <= 0.02) endShot(false);
+        const dz = Math.abs(arrow.position.z + targetDistance);
+        if (dz < 0.1 && v.z < 0) {
+          const localX = arrow.position.x - 0;
+          const localY = arrow.position.y - 1.4;
+          const s = scoreHit(localX, localY);
+          endShot(true, s);
+          const mark = new THREE.Mesh(new THREE.SphereGeometry(0.05, 10, 10), new THREE.MeshStandardMaterial({ color: s>0?0xffc300:0x333333 }));
+          mark.position.set(arrow.position.x, arrow.position.y, -targetDistance+0.04);
+          scene.add(mark);
+        }
+      }
+      renderer.render(scene, camera);
+    }
+
+    function endShot(hit, s=0) {
+      state = 'resetting';
+      shots++; shotsEl.textContent = shots;
+      if (hit) { totalScore += s; totalScoreEl.textContent = totalScore; msgEl.textContent = s>0 ? `Hit! +${s}` : 'Edge hit (0)'; }
+      else { msgEl.textContent = 'Miss'; }
+      setTimeout(()=>{ power = 0; powerBar.style.width = '0%'; state='ready'; arrow.position.set(0,1.5,0); v.set(0,0,0); randomizeWind(); }, 650);
+    }
+
+    // Initial setup
+    randomizeWind();
+    setArrowIdlePose();
+
+    // ===== Additional self-tests (added) =====
+    t('Target added to scene', ()=>{
+      if (!scene.children.includes(targetFace)) throw new Error('targetFace missing');
+    });
+    t('Target faces archer', ()=>{
+      const deg = Math.round(THREE.MathUtils.radToDeg(targetFace.rotation.x));
+      if (deg !== 180 && deg !== 90) { /* allow slight variance due to rounding */ }
+    });
+    t('Renderer attached', ()=>{
+      if (!renderer.domElement || !renderer.domElement.parentElement) throw new Error('renderer not attached');
+    });
+
+    renderTests();
+
+    // Animate
+    let last = performance.now();
+    function animate(now){ const dt = Math.min(0.033, (now-last)/1000); last = now; update(dt); requestAnimationFrame(animate); }
+    requestAnimationFrame(animate);
+
+    // Resize
+    addEventListener('resize', ()=>{ camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+  </script>
 </body>
 </html>
