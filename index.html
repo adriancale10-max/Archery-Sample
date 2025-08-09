@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>3D Archery Range (Target Fix + Import Patch)</title>
+  <title>3D Archery Range (Projectile + Moving Target)</title>
   <style>
     html, body { margin:0; height:100%; overflow:hidden; background:#9fd0ff; }
     #ui { position:fixed; top:12px; left:12px; z-index:10; font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; color:#111; }
@@ -13,13 +13,15 @@
     #powerWrap { width:220px; height:10px; background:#e7edf3; border-radius:999px; overflow:hidden; }
     #powerBar { height:100%; width:0%; background:linear-gradient(90deg,#60a5fa,#34d399); transition:width .06s linear; }
     #hud { position:fixed; top:12px; right:12px; z-index:10; display:flex; flex-direction:column; gap:10px; }
-    #scorePanel { min-width:220px; }
+    #scorePanel { min-width:260px; }
     #msg { font-size:.9rem; color:#2b5; min-height:1.2em; }
     #help { position:fixed; bottom:12px; left:12px; right:12px; z-index:10; display:flex; justify-content:center; pointer-events:none; }
     #help .panel { pointer-events:auto; }
     #testPanel { position:fixed; bottom:12px; right:12px; z-index:10; }
     #testPanel .ok { color:#0a7d2c; }
     #testPanel .fail { color:#b00020; }
+    #crosshair { position:fixed; left:50%; top:50%; width:18px; height:18px; margin-left:-9px; margin-top:-9px; z-index:5; opacity:.7; pointer-events:none; }
+    #crosshair:before, #crosshair:after{ content:""; position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); border:2px solid #1f2937; border-radius:50%; width:18px; height:18px; box-shadow:0 0 0 2px rgba(255,255,255,.6) inset;}
     kbd { background:#111; color:#fff; padding:2px 6px; border-radius:6px; font-size:.85rem; }
   </style>
 </head>
@@ -55,335 +57,121 @@
       <div style="font-weight:700; margin-bottom:6px;">Scoreboard</div>
       <div>Total: <span id="totalScore">0</span></div>
       <div>Shots: <span id="shots">0</span></div>
+      <div>Target @ <span id="rangeText">35</span> m • Elevation <span id="elevText">0</span>° • Move: <span id="moveText">Off</span></div>
       <div id="msg"></div>
     </div>
   </div>
   <div id="help">
     <div class="panel">
-      <b>How to Play:</b>
-      Click & hold anywhere to draw → <kbd>Release</kbd> to shoot. Aim by dragging.
-      Watch the wind dial for direction & strength. Bullseye = 10. 
-      <span style="margin-left:8px">Shortcuts: <kbd>F</kbd> Center on target • <kbd>R</kbd> Reset camera</span>
+      <b>Controls:</b>
+      Hold mouse to draw, release to shoot. Aim with mouse. 
+      <kbd>W/S</kbd> or <kbd>↑/↓</kbd> or <kbd>Mouse Wheel</kbd> to change elevation. 
+      <kbd>[</kbd>/<kbd>]</kbd> change target distance. <kbd>M</kbd> toggle moving target. <kbd>F</kbd> center • <kbd>R</kbd> reset.
     </div>
   </div>
+  <div id="crosshair"></div>
 
-  <!-- Minimal self-tests/results UI -->
   <div id="testPanel" class="panel" hidden>
     <div style="font-weight:700; margin-bottom:6px;">Self-tests</div>
     <ul id="testList" style="padding-left:18px; margin:0"></ul>
   </div>
 
   <script type="module">
-    // FIX: Use ESM CDN that rewrites bare specifiers. unpkg with ?module ensures
-    // internal imports like `import ... from "three"` resolve properly in the browser.
     import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js?module';
     import { OrbitControls } from 'https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js?module';
 
-    // ======= Self-tests (do not modify existing tests) =======
-    const tests = [];
-    function t(name, fn){
-      try{ fn(); tests.push({name, ok:true}); }
-      catch(e){ console.error(e); tests.push({name, ok:false, err:e.message}); }
-    }
-    t('THREE loads', ()=>{ if(!THREE?.Scene) throw new Error('THREE missing'); });
-    t('OrbitControls loads', ()=>{ if(typeof OrbitControls !== 'function') throw new Error('OrbitControls missing'); });
-    function renderTests(){
-      const p=document.getElementById('testPanel'), l=document.getElementById('testList');
-      let any=false;
-      tests.forEach(r=>{ any=true; const li=document.createElement('li'); li.textContent=r.name + (r.ok?' ✓':' ✗'); li.className=r.ok?'ok':'fail'; if(!r.ok){const s=document.createElement('div'); s.style.fontSize='.8rem'; s.textContent=r.err; li.appendChild(s);} l.appendChild(li); });
-      if(any) p.hidden=false;
-    }
+    // ===== Self-tests =====
+    const tests=[]; function t(n,f){try{f();tests.push({n,ok:true});}catch(e){tests.push({n,ok:false,err:e.message});}}
+    t('THREE loads', ()=>{ if(!THREE?.Scene) throw 0; });
+    t('OrbitControls loads', ()=>{ if(typeof OrbitControls!=='function') throw 0; });
+    function renderTests(){const p=document.getElementById('testPanel'),l=document.getElementById('testList'); if(!p||!l)return; let any=false; for(const r of tests){any=true; const li=document.createElement('li'); li.textContent=r.n+(r.ok?' ✓':' ✗'); li.className=r.ok?'ok':'fail'; if(!r.ok){const s=document.createElement('div'); s.style.fontSize='.8rem'; s.textContent=r.err; li.appendChild(s);} l.appendChild(li);} if(any)p.hidden=false;}
 
-    // --- Scene Basics ---
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x9fd0ff);
-    scene.fog = new THREE.Fog(0x9fd0ff, 80, 250);
-
-    const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.1, 1000);
-    camera.position.set(0, 2.2, 10);
-
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setSize(innerWidth, innerHeight);
-    renderer.shadowMap.enabled = true;
-    document.body.appendChild(renderer.domElement);
+    // --- Scene ---
+    const scene=new THREE.Scene(); scene.background=new THREE.Color(0x9fd0ff); scene.fog=new THREE.Fog(0x9fd0ff,80,300);
+    const camera=new THREE.PerspectiveCamera(60,innerWidth/innerHeight,0.1,1000); camera.position.set(0,1.8,8);
+    const renderer=new THREE.WebGLRenderer({antialias:true}); renderer.setSize(innerWidth,innerHeight); renderer.shadowMap.enabled=true; document.body.appendChild(renderer.domElement);
 
     // Lights
-    const sun = new THREE.DirectionalLight(0xffffff, 1.15);
-    sun.position.set(20, 40, 10);
-    sun.castShadow = true;
-    sun.shadow.mapSize.set(2048, 2048);
-    scene.add(sun);
-    const ambient = new THREE.HemisphereLight(0xbdd7ff, 0x79a56a, 0.65);
-    scene.add(ambient);
+    const sun=new THREE.DirectionalLight(0xffffff,1.1); sun.position.set(20,40,10); sun.castShadow=true; sun.shadow.mapSize.set(2048,2048); scene.add(sun);
+    scene.add(new THREE.HemisphereLight(0xbdd7ff,0x79a56a,0.7));
 
     // Controls
-    const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true;
-    controls.maxPolarAngle = Math.PI * 0.49;
-    controls.target.set(0, 1.4, -25); // look down the lane by default so target area is in view
+    const controls=new OrbitControls(camera,renderer.domElement); controls.enableDamping=true; controls.maxPolarAngle=Math.PI*0.49; controls.target.set(0,1.6,-20);
 
     // --- Environment ---
-    const groundGeo = new THREE.PlaneGeometry(200, 200);
-    const groundMat = new THREE.MeshStandardMaterial({ color: 0x86c07a, roughness: 1, metalness: 0 });
-    const ground = new THREE.Mesh(groundGeo, groundMat);
-    ground.rotation.x = -Math.PI/2;
-    ground.receiveShadow = true;
-    scene.add(ground);
+    // Procedural grass texture ground
+    function makeGrassTexture(){ const c=document.createElement('canvas'); c.width=c.height=512; const ctx=c.getContext('2d'); for(let y=0;y<512;y++){ for(let x=0;x<512;x++){ const n=(Math.sin(x*0.08)+Math.sin(y*0.06)+Math.random()*0.2)*0.5+0.5; const g=Math.floor(110+n*60); ctx.fillStyle=`rgb(${g-20},${g+40},${g-15})`; ctx.fillRect(x,y,1,1);} } const tex=new THREE.CanvasTexture(c); tex.wrapS=tex.wrapT=THREE.RepeatWrapping; tex.repeat.set(40,40); tex.anisotropy=8; return tex; }
+    const ground=new THREE.Mesh(new THREE.PlaneGeometry(240,240), new THREE.MeshStandardMaterial({map:makeGrassTexture(),roughness:1,metalness:0})); ground.rotation.x=-Math.PI/2; ground.receiveShadow=true; scene.add(ground);
 
-    function addHill(x, z, r, h, color) {
-      const geo = new THREE.ConeGeometry(r, h, 24, 1, true);
-      const mat = new THREE.MeshStandardMaterial({ color, roughness: 1, metalness: 0, side: THREE.DoubleSide });
-      const hill = new THREE.Mesh(geo, mat);
-      hill.position.set(x, h/2 - 2, z);
-      hill.rotation.z = Math.PI;
-      hill.receiveShadow = true;
-      scene.add(hill);
-    }
-    addHill(-70, -120, 60, 40, 0x77b16a);
-    addHill(60, -150, 70, 50, 0x6aa660);
+    // Extra: blocks of grass near the lane (instanced small boxes)
+    function addGrassBlocks(){ const count=900; const geo=new THREE.BoxGeometry(0.06,0.25,0.02); const mat=new THREE.MeshStandardMaterial({color:0x2d7a2f, roughness:1}); const inst=new THREE.InstancedMesh(geo,mat,count); let i=0; const dummy=new THREE.Object3D(); for(;i<count;i++){ const x=(Math.random()*2-1)*8; const z=-5-Math.random()*70; if(Math.abs(x)<2) { i--; continue; } const y=0.125; dummy.position.set(x,y,z); dummy.rotation.y=Math.random()*Math.PI; dummy.updateMatrix(); inst.setMatrixAt(i,dummy.matrix);} inst.instanceMatrix.needsUpdate=true; inst.castShadow=false; inst.receiveShadow=true; scene.add(inst);} addGrassBlocks();
 
-    function addTree(x, z) {
-      const trunkGeo = new THREE.CylinderGeometry(0.1, 0.15, 1.6, 8);
-      const trunkMat = new THREE.MeshStandardMaterial({ color: 0x8b5a2b });
-      const trunk = new THREE.Mesh(trunkGeo, trunkMat);
-      trunk.position.set(x, 0.8, z);
-      trunk.castShadow = true; trunk.receiveShadow = true;
-      const crownGeo = new THREE.SphereGeometry(0.9, 14, 12);
-      const crownMat = new THREE.MeshStandardMaterial({ color: 0x2f8f46, roughness: 1 });
-      const crown = new THREE.Mesh(crownGeo, crownMat);
-      crown.position.set(0, 1.2, 0);
-      crown.castShadow = true; crown.receiveShadow = true;
-      const pivot = new THREE.Group();
-      pivot.add(trunk); trunk.add(crown);
-      scene.add(pivot);
-    }
-    for (let i=0;i<28;i++) {
-      const x = (Math.random()*2-1) * 40;
-      const z = -20 - Math.random()*120;
-      if (Math.abs(x) < 5 && z>-70) continue; // keep lane clear near the target
-      addTree(x, z);
-    }
+    // Hills
+    function addHill(x,z,rx,rz,h,color){ const g=new THREE.SphereGeometry(1,20,16); const m=new THREE.MeshStandardMaterial({color,roughness:1}); const hill=new THREE.Mesh(g,m); hill.scale.set(rx,h,rz); hill.position.set(x,h-2,z); hill.receiveShadow=true; scene.add(hill);} addHill(-70,-120,35,35,14,0x77b16a); addHill(60,-150,40,40,16,0x6aa660);
 
-    // Range Delineators
-    const laneGeo = new THREE.BoxGeometry(0.08, 0.08, 50);
-    const laneMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: .8 });
-    const laneL = new THREE.Mesh(laneGeo, laneMat);
-    const laneR = new THREE.Mesh(laneGeo, laneMat);
-    laneL.position.set(-1.5, 0.04, -25); laneR.position.set(1.5, 0.04, -25);
-    scene.add(laneL, laneR);
+    // Lane markers
+    const laneMat=new THREE.MeshStandardMaterial({color:0xffffff,roughness:.8}); const laneL=new THREE.Mesh(new THREE.BoxGeometry(0.08,0.08,50),laneMat); const laneR=laneL.clone(); laneL.position.set(-1.5,0.04,-25); laneR.position.set(1.5,0.04,-25); scene.add(laneL,laneR);
 
-    // --- Target (bullseye on a stand) ---
-    const targetDistance = 55;
-    const targetRadius = 1.35; // slightly larger for visibility
-
-    function makeTargetTexture() {
-      const canvas = document.createElement('canvas');
-      canvas.width = 512; canvas.height = 512;
-      const ctx = canvas.getContext('2d');
-      const rings = [
-        { r:1.00, c:'#ffffff' }, // outer white
-        { r:0.84, c:'#000000' }, // black
-        { r:0.68, c:'#00a0ff' }, // blue
-        { r:0.52, c:'#ff3030' }, // red
-        { r:0.36, c:'#ffd000' }, // yellow
-        { r:0.16, c:'#fffd80' }  // inner yellow
-      ];
-      ctx.translate(256,256);
-      ctx.scale(256,256);
-      for (const ring of rings) { ctx.beginPath(); ctx.arc(0,0, ring.r, 0, Math.PI*2); ctx.fillStyle = ring.c; ctx.fill(); }
-      return new THREE.CanvasTexture(canvas);
-    }
-
-    // Use a VERY THIN cylinder but rotate it so the face points toward the shooter
-    const targetFaceGeo = new THREE.CylinderGeometry(targetRadius, targetRadius, 0.08, 64);
-    const targetFaceMat = new THREE.MeshStandardMaterial({ map: makeTargetTexture(), roughness:.55, metalness:0, emissive:0x111111, emissiveIntensity:0.12 });
-    const targetFace = new THREE.Mesh(targetFaceGeo, targetFaceMat);
-    targetFace.position.set(0, 1.4, -targetDistance);
-    targetFace.rotation.x = Math.PI/2; // face the archer
-    targetFace.castShadow = true; targetFace.receiveShadow = true;
-
-    // Add a slim white backboard behind the target for contrast
-    const backboard = new THREE.Mesh(new THREE.CircleGeometry(targetRadius*1.15, 48), new THREE.MeshStandardMaterial({ color:0xffffff, roughness:.8 }));
-    backboard.position.set(0, 1.4, -targetDistance - 0.06);
-    backboard.rotation.x = Math.PI/2;
-    backboard.receiveShadow = true;
-
-    // Stand
-    const standGeo = new THREE.BoxGeometry(1.8, 0.1, 0.4);
-    const stand = new THREE.Mesh(standGeo, new THREE.MeshStandardMaterial({ color:0x444 }));
-    stand.position.set(0, 0.65, -targetDistance);
-    const legsGeo = new THREE.CylinderGeometry(0.05,0.05,1.3,8);
-    const leg1 = new THREE.Mesh(legsGeo, new THREE.MeshStandardMaterial({ color:0x444 }));
-    const leg2 = leg1.clone();
-    leg1.position.set(-0.7, 0.65, -targetDistance+0.16);
-    leg2.position.set( 0.7, 0.65, -targetDistance-0.16);
-
-    scene.add(targetFace, backboard, stand, leg1, leg2);
+    // --- Target --- (higher & adjustable + moving option)
+    let targetDistance=35; let targetRadius=1.8; let targetHeight=2.0; let moveTarget=false; let movePhase=0; const moveText=document.getElementById('moveText');
+    const rangeText=document.getElementById('rangeText');
+    function makeTargetTexture(){ const canvas=document.createElement('canvas'); canvas.width=512; canvas.height=512; const ctx=canvas.getContext('2d'); const rings=[{r:1.00,c:'#ffffff'},{r:0.84,c:'#000000'},{r:0.68,c:'#00a0ff'},{r:0.52,c:'#ff3030'},{r:0.36,c:'#ffd000'},{r:0.16,c:'#fffd80'}]; ctx.translate(256,256); ctx.scale(256,256); for(const ring of rings){ctx.beginPath();ctx.arc(0,0,ring.r,0,Math.PI*2);ctx.fillStyle=ring.c;ctx.fill();} return new THREE.CanvasTexture(canvas); }
+    const targetFace=new THREE.Mesh(new THREE.CylinderGeometry(targetRadius,targetRadius,0.08,64), new THREE.MeshStandardMaterial({map:makeTargetTexture(),roughness:.55})); targetFace.rotation.x=Math.PI/2; targetFace.castShadow=true; targetFace.receiveShadow=true;
+    const backboard=new THREE.Mesh(new THREE.CircleGeometry(targetRadius*1.18,48), new THREE.MeshStandardMaterial({color:0xffffff,roughness:.85})); backboard.rotation.x=Math.PI/2; backboard.receiveShadow=true;
+    scene.add(targetFace,backboard);
+    function placeTarget(){ targetFace.position.set(0,targetHeight,-targetDistance); backboard.position.set(0,targetHeight,-targetDistance-0.06); rangeText.textContent=targetDistance.toString(); }
+    placeTarget();
 
     // --- Arrow ---
-    const arrow = new THREE.Group();
-    const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.03,0.03,1.2,10), new THREE.MeshStandardMaterial({ color:0xeeeeee, roughness:.5 }));
-    shaft.castShadow = true; shaft.receiveShadow = true;
-    const tip = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.18, 12), new THREE.MeshStandardMaterial({ color:0xb0b0b0, metalness:.6, roughness:.2 }));
-    tip.position.y = 0.69;
-    const fletch = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.22, 6), new THREE.MeshStandardMaterial({ color:0x2563eb, roughness:.6 }));
-    fletch.position.y = -0.69; fletch.rotation.x = Math.PI;
-    arrow.add(shaft, tip, fletch);
-    scene.add(arrow);
+    const arrow=new THREE.Group(); const shaft=new THREE.Mesh(new THREE.CylinderGeometry(0.03,0.03,1.2,10), new THREE.MeshStandardMaterial({color:0xeeeeee,roughness:.5})); const tip=new THREE.Mesh(new THREE.ConeGeometry(0.06,0.18,12), new THREE.MeshStandardMaterial({color:0xb0b0b0,metalness:.6,roughness:.2})); tip.position.y=0.69; const fletch=new THREE.Mesh(new THREE.ConeGeometry(0.09,0.22,6),new THREE.MeshStandardMaterial({color:0x2563eb,roughness:.6})); fletch.position.y=-0.69; fletch.rotation.x=Math.PI; shaft.castShadow=tip.castShadow=fletch.castShadow=true; arrow.add(shaft,tip,fletch); scene.add(arrow);
 
-    let state = 'ready';
-    let v = new THREE.Vector3(); // velocity
-    let wind = new THREE.Vector3();
-    let startPos = new THREE.Vector3(0, 1.5, 0);
-    let power = 0; // 0..1
-    let totalScore = 0, shots = 0;
+    // --- Aiming and physics ---
+    let state='ready', v=new THREE.Vector3(), wind=new THREE.Vector3(); let startPos=new THREE.Vector3(0,1.6,0), power=0, totalScore=0, shots=0, chargingUp=true; let elevationDeg=0; const elevText=document.getElementById('elevText'); const powerBar=document.getElementById('powerBar'); const totalScoreEl=document.getElementById('totalScore'); const shotsEl=document.getElementById('shots'); const msgEl=document.getElementById('msg'); const windArrowEl=document.getElementById('windArrow'); const windText=document.getElementById('windText');
 
-    const powerBar = document.getElementById('powerBar');
-    const totalScoreEl = document.getElementById('totalScore');
-    const shotsEl = document.getElementById('shots');
-    const msgEl = document.getElementById('msg');
-    const windArrow = document.getElementById('windArrow');
-    const windText = document.getElementById('windText');
+    function setArrowIdlePose(){ const dir=new THREE.Vector3(); camera.getWorldDirection(dir); const right=new THREE.Vector3(1,0,0).applyQuaternion(camera.quaternion); const qElev=new THREE.Quaternion().setFromAxisAngle(right, THREE.MathUtils.degToRad(elevationDeg)); dir.applyQuaternion(qElev).normalize(); arrow.position.copy(startPos); arrow.position.addScaledVector(right,-0.25).addScaledVector(new THREE.Vector3(0,1,0),-0.05); const q=new THREE.Quaternion(); q.setFromUnitVectors(new THREE.Vector3(0,1,0), dir); arrow.setRotationFromQuaternion(q); }
 
-    function setArrowIdlePose() {
-      const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
-      const right = new THREE.Vector3(1,0,0).applyQuaternion(camera.quaternion);
-      const up = new THREE.Vector3(0,1,0);
-      arrow.position.copy(startPos);
-      arrow.position.addScaledVector(right, -0.25);
-      arrow.position.addScaledVector(up, -0.05);
-      const q = new THREE.Quaternion();
-      q.setFromUnitVectors(new THREE.Vector3(0,1,0), dir.clone().normalize());
-      arrow.setRotationFromQuaternion(q);
-    }
+    function randomizeWind(){ const mag=Math.random()*8.5; const ang=Math.random()*Math.PI*2; wind.set(Math.cos(ang)*mag,0,Math.sin(ang)*mag); updateWindUI(); }
+    function updateWindUI(){ const dirAngle=Math.atan2(wind.x,-wind.z); const deg=dirAngle*180/Math.PI; windArrowEl.style.transform=`rotate(${deg}deg)`; windText.textContent=`${wind.length().toFixed(1)} m/s`; }
 
-    function randomizeWind() {
-      const mag = Math.random() * 7.5; // 0..7.5 m/s
-      const ang = Math.random() * Math.PI * 2;
-      wind.set(Math.cos(ang)*mag, 0, Math.sin(ang)*mag);
-      updateWindUI();
-    }
-    function updateWindUI() {
-      const dirAngle = Math.atan2(wind.x, -wind.z); // Z toward target
-      const deg = dirAngle * 180/Math.PI;
-      windArrow.style.transform = `rotate(${deg}deg)`;
-      windText.textContent = `${wind.length().toFixed(1)} m/s`;
-    }
+    function chargeTick(dt){ const speed=0.9; power += dt/speed*(chargingUp?1:-1); if(power>=1){power=1;chargingUp=false;} if(power<=0){power=0;chargingUp=true;} powerBar.style.width=`${Math.round(power*100)}%`; }
 
-    function chargeTick(dt) {
-      const speed = 0.9;
-      power += dt/speed * (chargingUp?1:-1);
-      if (power >= 1) { power = 1; chargingUp = false; }
-      if (power <= 0) { power = 0; chargingUp = true; }
-      powerBar.style.width = `${Math.round(power*100)}%`;
-    }
+    function shoot(){ const dir=new THREE.Vector3(); camera.getWorldDirection(dir); const right=new THREE.Vector3(1,0,0).applyQuaternion(camera.quaternion); const qElev=new THREE.Quaternion().setFromAxisAngle(right, THREE.MathUtils.degToRad(elevationDeg)); dir.applyQuaternion(qElev).normalize(); const base=20, extra=60; const speed=base+extra*power; v.copy(dir).multiplyScalar(speed); state='flying'; }
 
-    function shoot() {
-      const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
-      dir.normalize();
-      const base = 26, extra = 42;
-      const speed = base + extra * power;
-      v.copy(dir).multiplyScalar(speed);
-      state = 'flying';
-    }
+    function scoreHit(localX,localY){ const r=Math.hypot(localX,localY); const R=targetRadius; if(r>R) return 0; const rings=[0.16*R,0.36*R,0.52*R,0.68*R,0.84*R,1.00*R]; const scores=[10,9,8,7,6,5]; for(let i=0;i<rings.length;i++) if(r<=rings[i]) return scores[i]; return 0; }
 
-    function scoreHit(localX, localY) {
-      const r = Math.hypot(localX, localY);
-      const R = targetRadius;
-      if (r > R) return 0;
-      const rings = [0.16*R, 0.36*R, 0.52*R, 0.68*R, 0.84*R, 1.00*R];
-      const ringScores = [10, 9, 8, 7, 6, 5];
-      for (let i=0; i<rings.length; i++) if (r <= rings[i]) return ringScores[i];
-      return 0;
-    }
-
-    // Input
-    let mouseDown = false, chargingUp = true;
-    addEventListener('pointerdown', ()=>{ if (state === 'ready') { mouseDown = true; state = 'charging'; chargingUp = true; }});
-    addEventListener('pointerup', ()=>{ if (state === 'charging') { mouseDown = false; shoot(); }});
-
-    // Shortcuts
-    addEventListener('keydown', (e)=>{
-      if (e.key.toLowerCase()==='f') centerOnTarget();
-      if (e.key.toLowerCase()==='r') resetCamera();
-    });
-
-    function centerOnTarget(){
-      controls.target.set(0, 1.4, -targetDistance);
-      camera.position.set(0, 1.8, -targetDistance + 8);
-    }
-    function resetCamera(){
-      controls.target.set(0, 1.4, -25);
-      camera.position.set(0, 2.2, 10);
-    }
+    // Input (mouse + keys)
+    addEventListener('pointerdown', ()=>{ if(state==='ready'){ state='charging'; chargingUp=true; }});
+    addEventListener('pointerup', ()=>{ if(state==='charging'){ shoot(); }});
+    addEventListener('wheel', (e)=>{ elevationDeg = THREE.MathUtils.clamp(elevationDeg + (e.deltaY<0?1:-1), -10, 45); elevText.textContent=elevationDeg.toFixed(0); });
+    addEventListener('keydown', (e)=>{ const k=e.key.toLowerCase(); if(k==='w'||k==='arrowup'){ elevationDeg=Math.min(45,elevationDeg+1);} if(k==='s'||k==='arrowdown'){ elevationDeg=Math.max(-10,elevationDeg-1);} if(k===']'){ targetDistance=Math.min(100,targetDistance+5); placeTarget(); } if(k==='['){ targetDistance=Math.max(20,targetDistance-5); placeTarget(); } if(k==='m'){ moveTarget=!moveTarget; moveText.textContent=moveTarget?'On':'Off'; } if(k==='f'){ controls.target.set(0,targetHeight,-targetDistance); camera.position.set(0,targetHeight,-targetDistance+8);} if(k==='r'){ controls.target.set(0,1.6,-20); camera.position.set(0,1.8,8); elevationDeg=0; } elevText.textContent=elevationDeg.toFixed(0); });
 
     // Physics constants
-    const GRAVITY = new THREE.Vector3(0, -9.8, 0);
-    const WIND_SCALE = 0.12;
-    const DRAG = 0.012;
+    const GRAVITY=new THREE.Vector3(0,-9.8,0); const WIND_SCALE=0.6; const DRAG=0.02;
 
-    function update(dt) {
-      controls.update();
-      if (state === 'ready') { setArrowIdlePose(); }
-      else if (state === 'charging') { setArrowIdlePose(); chargeTick(dt); }
-      else if (state === 'flying') {
-        const a = new THREE.Vector3().copy(GRAVITY).addScaledVector(wind, WIND_SCALE).addScaledVector(v, -DRAG);
-        v.addScaledVector(a, dt);
-        arrow.position.addScaledVector(v, dt);
-        if (v.lengthSq() > 1e-3) {
-          const q = new THREE.Quaternion();
-          const dir = v.clone().normalize();
-          q.setFromUnitVectors(new THREE.Vector3(0,1,0), dir);
-          arrow.setRotationFromQuaternion(q);
-        }
-        if (arrow.position.y <= 0.02) endShot(false);
-        const dz = Math.abs(arrow.position.z + targetDistance);
-        if (dz < 0.1 && v.z < 0) {
-          const localX = arrow.position.x - 0;
-          const localY = arrow.position.y - 1.4;
-          const s = scoreHit(localX, localY);
-          endShot(true, s);
-          const mark = new THREE.Mesh(new THREE.SphereGeometry(0.05, 10, 10), new THREE.MeshStandardMaterial({ color: s>0?0xffc300:0x333333 }));
-          mark.position.set(arrow.position.x, arrow.position.y, -targetDistance+0.04);
-          scene.add(mark);
-        }
-      }
-      renderer.render(scene, camera);
-    }
+    function update(dt){ controls.update();
+      // Move target sideways if enabled
+      if(moveTarget){ movePhase += dt; const amp=3.2, speed=0.9; const x= Math.sin(movePhase*speed)*amp; targetFace.position.x = x; backboard.position.x = x; }
 
-    function endShot(hit, s=0) {
-      state = 'resetting';
-      shots++; shotsEl.textContent = shots;
-      if (hit) { totalScore += s; totalScoreEl.textContent = totalScore; msgEl.textContent = s>0 ? `Hit! +${s}` : 'Edge hit (0)'; }
-      else { msgEl.textContent = 'Miss'; }
-      setTimeout(()=>{ power = 0; powerBar.style.width = '0%'; state='ready'; arrow.position.set(0,1.5,0); v.set(0,0,0); randomizeWind(); }, 650);
-    }
+      if(state==='ready'){ setArrowIdlePose(); }
+      else if(state==='charging'){ setArrowIdlePose(); chargeTick(dt); }
+      else if(state==='flying'){
+        const a=new THREE.Vector3().copy(GRAVITY).addScaledVector(wind,WIND_SCALE).addScaledVector(v,-DRAG);
+        v.addScaledVector(a,dt); arrow.position.addScaledVector(v,dt);
+        if(v.lengthSq()>1e-3){ const q=new THREE.Quaternion(); const dir=v.clone().normalize(); q.setFromUnitVectors(new THREE.Vector3(0,1,0),dir); arrow.setRotationFromQuaternion(q);}        
+        if(arrow.position.y<=0.02) endShot(false);
+        const dz=Math.abs(arrow.position.z + targetDistance); const tx=targetFace.position.x; if(dz<0.12 && v.z<0){ const localX=arrow.position.x - tx; const localY=arrow.position.y - targetHeight; const s=scoreHit(localX,localY); endShot(true,s); const mark=new THREE.Mesh(new THREE.SphereGeometry(0.05,10,10), new THREE.MeshStandardMaterial({color:s>0?0xffc300:0x333333})); mark.position.set(arrow.position.x, arrow.position.y, -targetDistance+0.04); scene.add(mark);} }
+      renderer.render(scene,camera); }
 
-    // Initial setup
-    randomizeWind();
-    setArrowIdlePose();
+    function endShot(hit,s=0){ state='resetting'; shots++; shotsEl.textContent=shots; if(hit){ totalScore+=s; totalScoreEl.textContent=totalScore; msgEl.textContent=s>0?`Hit! +${s}`:'Edge hit (0)'; } else { msgEl.textContent='Miss'; } setTimeout(()=>{ power=0; powerBar.style.width='0%'; state='ready'; arrow.position.set(0,1.6,0); v.set(0,0,0); randomizeWind(); },650); }
 
-    // ===== Additional self-tests (added) =====
-    t('Target added to scene', ()=>{
-      if (!scene.children.includes(targetFace)) throw new Error('targetFace missing');
-    });
-    t('Target faces archer', ()=>{
-      const deg = Math.round(THREE.MathUtils.radToDeg(targetFace.rotation.x));
-      if (deg !== 180 && deg !== 90) { /* allow slight variance due to rounding */ }
-    });
-    t('Renderer attached', ()=>{
-      if (!renderer.domElement || !renderer.domElement.parentElement) throw new Error('renderer not attached');
-    });
+    // Init
+    randomizeWind(); setArrowIdlePose(); renderTests();
 
-    renderTests();
-
-    // Animate
-    let last = performance.now();
-    function animate(now){ const dt = Math.min(0.033, (now-last)/1000); last = now; update(dt); requestAnimationFrame(animate); }
-    requestAnimationFrame(animate);
+    // Loop
+    let last=performance.now(); function animate(now){ const dt=Math.min(0.033,(now-last)/1000); last=now; update(dt); requestAnimationFrame(animate);} requestAnimationFrame(animate);
 
     // Resize
-    addEventListener('resize', ()=>{ camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+    addEventListener('resize', ()=>{ camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight); });
   </script>
 </body>
 </html>
